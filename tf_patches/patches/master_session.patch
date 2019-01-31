@@ -1,0 +1,45 @@
+ # @file   master_session.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the master_session file to disallow any graph change except from the PS. This is crucial for Byzantine resilience.
+
+--- old/tensorflow/tensorflow/core/distributed_runtime/master_session.cc	2019-01-21 10:50:52.582559001 +0100
++++ tensorflow/tensorflow/core/distributed_runtime/master_session.cc	2019-01-21 10:51:51.098904093 +0100
+@@ -417,7 +417,12 @@
+       c->status = s;
+       done.DecrementCount();
+     };
+-    part.worker->RegisterGraphAsync(&c->req, &c->resp, cb);
++        printf("Running RegisterGraphAsync on...... %s iteration %d \ %d \n", part.name.c_str(),i,num);
++        std::string ps("ps");
++        if(part.name.find(ps.c_str()) == std::string::npos && i == 0)
++                printf("I am not registering this.....it is coming from byz\n");
++        else
++            part.worker->RegisterGraphAsync(&c->req, &c->resp, cb);
+   }
+   done.Wait();
+   for (int i = 0; i < num; ++i) {

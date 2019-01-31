@@ -1,0 +1,175 @@
+ # @file   mpi_rendezvous_mgr2.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the mpi_rendezvous_mgr.h file to support UDP as a transport protocol.
+
+--- old/tensorflow/tensorflow/contrib/mpi/mpi_rendezvous_mgr.h	2019-01-21 10:50:52.498558510 +0100
++++ tensorflow/tensorflow/contrib/mpi/mpi_rendezvous_mgr.h	2019-01-21 10:51:50.986903428 +0100
+@@ -41,7 +41,7 @@
+ #define TAG_REQTENSOR 1010
+ #define TAG_SENDTENSOR 2020
+ #define TAG_SENDTENSOR2 3030
+-
++#define TAG_SENDTENSOR_MD 4040
+ namespace tensorflow {
+ 
+ class MPISendTensorCall {
+@@ -134,7 +134,6 @@
+ 
+   TF_DISALLOW_COPY_AND_ASSIGN(MPIRemoteRendezvous);
+ };
+-
+ class MPIRendezvousMgr : public BaseRendezvousMgr {
+  public:
+   explicit MPIRendezvousMgr(const WorkerEnv* env);
+@@ -151,7 +150,11 @@
+     mutex_lock l(mrq_);
+     request_queue_.push(RequestQueueEntry(key, std::move(request_call)));
+     const std::string key_id = strings::StrCat(key, "_", step_id);
++	int proc_id=0;
++	MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &proc_id));
++//	printf("At process %d In queue request, adding the key: %s\n",proc_id, key_id.c_str());
+     recv_tensor_map_[key_id] = std::shared_ptr<MPIRequestTensorCall>(rCall);
++	tensor_received[key_id] = false;
+   }
+ 
+  protected:
+@@ -169,7 +172,9 @@
+       SendQueueEntry;
+ 
+   const WorkerEnv* worker_env_2;
+-  std::thread background_thread_;
++  std::thread background_thread_;
++  std::thread recv_thread_;
++  std::thread recv_req_thread_;
+   MPIUtils* mpiutils_;
+   bool use_optimal_transfer_;
+ 
+@@ -180,33 +185,71 @@
+   std::queue<RequestQueueEntry> request_queue_ GUARDED_BY(mrq_);
+   std::map<std::string, std::shared_ptr<MPIRequestTensorCall>> recv_tensor_map_
+       GUARDED_BY(mrq_);
++  std::map<std::string, bool> tensor_received;
++  std::map<std::string, bool> tensor_data;
+ 
+   RecentRequestIds recv_tensor_recent_request_ids_;
+ 
+   void AddRequest(RecvTensorRequest, const int);
+   void MPIBackgroundThread();
++  void recvTensors();			
++  void recvTensorReqs();
+ 
+   void QueueSendRequest(SendQueueEntry req) {
+     mutex_lock l(msq_);
+     send_queue_.push(req);
+   }
+ 
+-  void GetRecvCall(const int64 step_id, const std::string& key,
++  bool getRandomCall(std::shared_ptr<MPIRequestTensorCall>* call, std::string& str){
++    mutex_lock l(mrq_);
++	std::map<std::string, std::shared_ptr<MPIRequestTensorCall>>::iterator it;
++
++	for ( it = recv_tensor_map_.begin(); it != recv_tensor_map_.end(); it++){
++		*call = it->second;
++		str = it->first;
++		tensor_received[it->first] = true;
++//		printf("Choosen the tensor of key %s \n", (it->first).c_str());
++		return true;
++	}
++	return false;
++  }
++
++  bool GetRecvCall(const int64 step_id, const std::string& key,
+                    std::shared_ptr<MPIRequestTensorCall>* call) {
+     mutex_lock l(mrq_);
+ 
+     const std::string key_id = strings::StrCat(key, "_", step_id);
++	int proc_id=0;
++	MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &proc_id));
++	if (tensor_received[key_id] == true)
++		return false;
+     if (recv_tensor_map_.find(key_id) == recv_tensor_map_.end()) {
+       LOG(FATAL) << "Key/step not found in recv_tensor_map_, step: " << step_id
+                  << " key:  " << key << std::endl;
++		return false;															
+     }
+     *call = recv_tensor_map_[key_id];
++	tensor_received[key_id] = true;
++	return true;
+   }
+ 
+   void RemoveRecvCall(const int64 step_id, const std::string& key) {
+     mutex_lock l(mrq_);
+     const std::string key_id = strings::StrCat(key, "_", step_id);
+-    recv_tensor_map_.erase(key_id);
++    recv_tensor_map_.erase(key_id);				//TODO: This line results in error in sharing policies or something like that!
++  }
++
++  void ClearDelivered(){
++    mutex_lock l(mrq_);
++
++	std::map<std::string, std::shared_ptr<MPIRequestTensorCall>>::iterator it = recv_tensor_map_.begin();
++//	while (it != recv_tensor_map_.end()) {
++//		if (tensor_received[it->first]) {
++//		   it = recv_tensor_map_.erase(it);
++//		} else {
++//		   ++it;
++//		}
++//	}
+   }
+ 
+   bool GetRequest(RequestQueueEntry* req) {
+@@ -228,7 +271,7 @@
+     }
+     return false;
+   }
+-
++/*
+   template <typename T>
+   int ProbeForData(const int tag, MPI_Status* status, T* obj) {
+     int flag = 0, msg_size = 0;
+@@ -241,12 +284,19 @@
+       MPI_Status stat2;
+       std::vector<char> request_buffer_(msg_size);
+       MPI_Mrecv(&request_buffer_[0], msg_size, MPI_CHAR, &msg, &stat2);
++        //first of all, remove the signature if I am the server...this should be signed
++        unsigned char unsigned_message[MESSAGE_LEN];
++        unsigned long long unsigned_message_len;
++        if (crypto_sign_open(unsigned_message, &unsigned_message_len,
++                     signed_message, signed_message_len, pk) != 0) {
++            // Incorrect signature!
++        }
+       bool res = obj->ParseFromArray(&request_buffer_[0], msg_size);
+       CHECK(res) << "Failed to parse incomming message";
+     }
+     return flag;
+   }
+-
++*/
+   TF_DISALLOW_COPY_AND_ASSIGN(MPIRendezvousMgr);
+ };  // MPIRendezvousMgr
+ }  // namespace tensorflow

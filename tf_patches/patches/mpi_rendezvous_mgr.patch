@@ -1,0 +1,1127 @@
+ # @file   mpi_rendezvous_mgr.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the mpi_rendezvous_mgr.cc file to support UDP as a transport protocol.
+
+--- old/tensorflow/tensorflow/contrib/mpi/mpi_rendezvous_mgr.cc	2019-01-21 10:50:52.498558510 +0100
++++ tensorflow/tensorflow/contrib/mpi/mpi_rendezvous_mgr.cc	2019-01-21 10:51:50.986903428 +0100
+@@ -20,9 +20,15 @@
+ #include <chrono>
+ #include <functional>
+ #include <memory>
++#include <cmath>		//to define NAN
+ #include <string>
+ #include <utility>
+ #include <vector>
++#include <math.h>
++#include <algorithm>    // std::shuffle
++#include <array>        // std::array
++#include <random>       // std::default_random_engine
++#include <chrono>       // std::chrono::system_clock
+ 
+ #include "tensorflow/core/common_runtime/device.h"
+ #include "tensorflow/core/common_runtime/device_mgr.h"
+@@ -30,8 +36,264 @@
+ #include "tensorflow/core/distributed_runtime/session_mgr.h"
+ #include "tensorflow/core/distributed_runtime/tensor_coding.h"
+ 
++//UDP sockets update
++#include <sys/socket.h>
++#include <arpa/inet.h>
++#include <unistd.h>
++#include <netdb.h> //hostent
++#include<arpa/inet.h>
++#include <time.h>       /* time */
++#include <cstdlib>
++#include <iostream>
++#include <sstream>
++#include "sodium.h"
++#include <fstream>
+ namespace tensorflow {
+ 
++struct worker_info{
++	int worker_tcp_socket;
++	struct sockaddr_in wrd;
++        struct sockaddr_in wsd;
++	unsigned char pk[crypto_sign_PUBLICKEYBYTES];
++};
++
++	struct worker_info workers[30];
++	int proc_id;
++	int send_data, send_data_tcp, recv_data, send_req, recv_req, recv_data_tcp;
++	struct sockaddr_in wsd, wrd, wsr, wrr, cli_address, wrd_tcp;
++	struct sockaddr_in ssd, ssd_tcp, srd, ssr, srr;
++	bool udp=false;
++
++//structs to keep public and private keys for workers...all security work is done by sodium library
++unsigned char pk[crypto_sign_PUBLICKEYBYTES];
++unsigned char sk[crypto_sign_SECRETKEYBYTES];
++
++/*
++    Get ip from domain name
++ */
++int hostname_to_ip(const char * hostname , char* ip){
++    struct hostent *he;
++    struct in_addr **addr_list;
++    int i;
++         
++    if ( (he = gethostbyname( hostname ) ) == NULL) 
++    {
++        // get the host info
++        herror("gethostbyname");
++        return 1;
++    }
++ 
++    addr_list = (struct in_addr **) he->h_addr_list;
++     
++    for(i = 0; addr_list[i] != NULL; i++) 
++    {
++        //Return the first one;
++        strcpy(ip , inet_ntoa(*addr_list[i]) );
++        return 0;
++    }     
++    return 1;
++}
++        struct timeval read_timeout;
++        struct timeval remove_timeout;
++	int worker_tcp_socket;
++//This function initializes all sockets and addresses to which sockets will bind
++	int num_workers;
++void init_sockets(const MPIUtils* mpiutils_){
++    char server[100];
++	char worker[100];
++	const char* ps = getenv("PS");
++	if(ps!=NULL)
++		hostname_to_ip(ps , server);
++	else{
++		printf("PS is not set! exit....\n");
++		exit(1);
++	}
++	const char* num_work = getenv("Worker");
++//	num_workers = *num_work - 48;
++	std::stringstream strValue;
++	strValue << num_work;
++	strValue >> num_workers;
++
++	printf("Waiting for %d workers to connect \n", num_workers);
++	char work[128];
++	int len = -1;
++	MPI_CHECK(MPI_Get_processor_name(work, &len));
++	if(work!=NULL){
++		hostname_to_ip(work , worker);
++		printf("Detected worker name is %s \n", worker);
++	}else{
++		printf("Worker is not set! exit....\n");
++		exit(1);
++	}
++//    hostname_to_ip(mpiutils_->hostname , hostname);
++
++//	printf("%s resolved to %s \n" , mpiutils_->hostname, hostname);
++
++//char* hostname = "127.0.0.1";
++
++//first create the addresses
++		memset((char *) &wsd, 0, sizeof(wsd));
++		memset((char *) &wrd, 0, sizeof(wrd));
++	        memset((char *) &wrd_tcp, 0, sizeof(wrd_tcp));
++       		memset((char *) &ssd_tcp, 0, sizeof(ssd_tcp));
++		memset((char *) &wsr, 0, sizeof(wsr));
++		memset((char *) &wrr, 0, sizeof(wrr));
++		memset((char *) &ssd, 0, sizeof(ssd));
++		memset((char *) &srd, 0, sizeof(srd));
++		memset((char *) &ssr, 0, sizeof(ssr));
++		memset((char *) &srr, 0, sizeof(srr));
++		 
++		wsd.sin_family = AF_INET;
++		wsd.sin_addr.s_addr = inet_addr(worker);
++		wrd.sin_family = AF_INET;
++		wrd.sin_addr.s_addr = inet_addr(worker);
++        wrd_tcp.sin_family = AF_INET;
++        wrd_tcp.sin_addr.s_addr = inet_addr(worker);
++		wsr.sin_family = AF_INET;
++		wsr.sin_addr.s_addr = inet_addr(worker);
++		wrr.sin_family = AF_INET;
++		wrr.sin_addr.s_addr = inet_addr(worker);
++
++		ssd.sin_family = AF_INET;
++		ssd.sin_addr.s_addr = inet_addr(server);
++        ssd_tcp.sin_family = AF_INET;
++        ssd_tcp.sin_addr.s_addr = inet_addr(server);
++		srd.sin_family = AF_INET;
++		srd.sin_addr.s_addr = inet_addr(server);
++		ssr.sin_family = AF_INET;
++		ssr.sin_addr.s_addr = inet_addr(server);
++		srr.sin_family = AF_INET;
++		srr.sin_addr.s_addr = inet_addr(server);
++
++		wsd.sin_port = htons(2222);
++		wrd.sin_port = htons(2223);
++		wrd_tcp.sin_port = htons(2241);
++		wsr.sin_port = htons(2224);
++		wrr.sin_port = htons(2225);
++		ssd.sin_port = htons(2226);
++		ssd_tcp.sin_port = htons(2240);
++		srd.sin_port = htons(2227);
++		ssr.sin_port = htons(2238);
++		srr.sin_port = htons(2239);
++
++//set recvfrom blocking time to few seconds only
++	read_timeout.tv_sec = 0;
++	read_timeout.tv_usec = 10000;
++
++        remove_timeout.tv_sec = 10;
++        remove_timeout.tv_usec = 100;
++
++    //create a UDP socket
++	if(proc_id == 0){
++//		
++//		
++			if((send_data_tcp=socket(AF_INET, SOCK_STREAM, 0)) == -1)
++				exit(1);
++			if ((send_data=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++//		
++			if ((recv_data=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++//		
++			if ((send_req=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++//		
++			if ((recv_req=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++
++		//bind socket to port
++		int b=0;
++		if( ( b=bind(send_data , (struct sockaddr*)&ssd, sizeof(ssd)) ) == -1)
++		    exit(1);
++        if( ( b=bind(send_data_tcp , (struct sockaddr*)&ssd_tcp, sizeof(ssd_tcp)) ) == -1)
++            exit(1);
++		if( ( b=bind(send_req , (struct sockaddr*)&ssr, sizeof(ssr)) ) == -1)
++		    exit(1);
++		if( ( b=bind(recv_data , (struct sockaddr*)&srd, sizeof(srd)) ) == -1)
++		    exit(1);
++		if( ( b=bind(recv_req , (struct sockaddr*)&srr, sizeof(srr)) ) == -1)
++		    exit(1);
++
++//                int num_workers=2;      //make this environment variable
++		if(listen(send_data_tcp, num_workers) < 0)
++			exit(1);
++		printf("listening to new connections\n");
++		int num_iter=0;
++		while(num_iter != num_workers){
++			socklen_t cli_len = sizeof(cli_address);
++	     	 	if((worker_tcp_socket = accept(send_data_tcp, (sockaddr *)&cli_address, &cli_len)) < 0)
++        	    		perror("accept");
++			else{
++				printf("Accepted new connection now\n");
++				wrd.sin_addr.s_addr = cli_address.sin_addr.s_addr;
++                                wsd.sin_addr.s_addr = cli_address.sin_addr.s_addr;
++				int tmp;
++				recv(worker_tcp_socket, &tmp,4,0);
++				int worker_rank = ntohl(tmp);
++				workers[worker_rank].worker_tcp_socket = worker_tcp_socket;
++				memcpy(&workers[worker_rank].wrd, &wrd, sizeof(wrd));
++                                memcpy(&workers[worker_rank].wsd, &wsd, sizeof(wsd));
++				printf("Info of the connected clinet..........\n");
++				printf("Rank is %d and socket created number is %d \n", worker_rank, worker_tcp_socket);
++				printf("Address received is %ld\n", cli_address.sin_addr.s_addr);
++				//receive the public key of this client
++				int ret = recv(worker_tcp_socket, &workers[worker_rank].pk,crypto_sign_PUBLICKEYBYTES,0);
++				printf("Received public key of worker %d ... it is of size %d \n", worker_rank, ret);
++				num_iter++;
++			}//end if
++		}//end while
++		//set recv sockets as non-blocking
++//		setsockopt(recv_req, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++//		setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++
++	}else{ //this hack sohuld be removed!!
++//		
++//		
++			if ((send_data=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++//		
++			if ((recv_data=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++            if ((recv_data_tcp=socket(AF_INET, SOCK_STREAM, 0)) == -1)
++                     exit(1);
++//		
++			if ((send_req=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++//		
++			if ((recv_req=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1)
++				 exit(1);
++
++		//bind socket to port
++		int b=0;
++		if( ( b=bind(send_data , (struct sockaddr*)&wsd, sizeof(wsd)) ) == -1)
++		    exit(1);
++		if( ( b=bind(send_req , (struct sockaddr*)&wsr, sizeof(wsr)) ) == -1)
++		    exit(1);
++		if( ( b=bind(recv_data , (struct sockaddr*)&wrd, sizeof(wrd)) ) == -1)
++		    exit(1);
++        if( ( b=bind(recv_data_tcp , (struct sockaddr*)&wrd_tcp, sizeof(wrd_tcp)) ) == -1)
++            exit(1);
++		if( ( b=bind(recv_req , (struct sockaddr*)&wrr, sizeof(wrr)) ) == -1)
++		    exit(1);
++
++//		setsockopt(recv_req, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++//		setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++
++		sleep(1);
++		if(connect(recv_data_tcp, (struct sockaddr*)&ssd_tcp, sizeof(sockaddr)) < 0){
++			printf("Error in connect !!! errno %d \n ", errno);
++			exit(1);
++		}
++ 		int my_rank_id = htonl(proc_id);
++		send(recv_data_tcp, (const char*)&my_rank_id, 4, 0);		//As a worker, I am sending my process ID to the PS
++		sleep(1);
++		printf("before generating key_pair\n");
++		crypto_sign_keypair(pk, sk);			//generate public and private keys for me (a clinet) then send my public key to the server
++		printf("At worker %d a key pair generated... sending my public key\n", proc_id);
++		send(recv_data_tcp, pk, crypto_sign_PUBLICKEYBYTES, 0);
++	}
++}
++int num_udp_workers = 0;
+ MPIRendezvousMgr::MPIRendezvousMgr(const WorkerEnv* env)
+     : BaseRendezvousMgr(env),
+       worker_env_2(env),
+@@ -49,16 +311,45 @@
+   const std::string task_id =
+       strings::StrCat(parsed.job, ":", parsed.replica, ":", parsed.task);
+ 
++//The constructor does nothing but creating the running background thread!
+   mpiutils_ = new MPIUtils(task_id);
++
++//init libsodium for authentication
++    if (sodium_init() < 0) {
++	printf("Error with libsodium! \n");
++	exit(1);
++    }
++	proc_id=0;
++	MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &proc_id));
++	//Here, we need to extract the IP and port number of this process too!
++  const char* udpenv = getenv("USE_UDP");
++  if (udpenv && udpenv[0] == '1') {
++    LOG(INFO) << "Using UDP for tensors transmission\n";
++    udp = true;
++	init_sockets(mpiutils_);
++  }
++
++//Only for the sender part (PS)
++	const char* udp_workers = getenv("UDP_WORKERS");
++//	num_udp_workers = *udp_workers - 48;
++        std::stringstream strValue2;
++        strValue2 << udp_workers;
++        strValue2 >> num_udp_workers;
++	printf("Number of workers running over UDP is %d \n", num_udp_workers);
+   background_thread_ =
+       std::thread(&MPIRendezvousMgr::MPIBackgroundThread, this);
++	if(udp == true && proc_id == 0){		//Only the PS should run that thread
++		recv_thread_ =
++			std::thread(&MPIRendezvousMgr::recvTensors, this);
++	}
+ }
+ 
+ BaseRemoteRendezvous* MPIRendezvousMgr::Create(int64 step_id,
+                                                const WorkerEnv* worker_env) {
+   return new MPIRemoteRendezvous(worker_env, step_id, mpiutils_, this);
+ }
+-
++Device* dst_device_stored;
++//This is the method that should be used to receive some requested data
+ void MPIRemoteRendezvous::RecvFromRemoteAsync(
+     const Rendezvous::ParsedKey& parsed, const Rendezvous::Args& recv_args,
+     DoneCallback done) {
+@@ -70,12 +361,15 @@
+ 
+   std::string src_task = strings::StrCat(
+       parsed.src.job, ":", parsed.src.replica, ":", parsed.src.task);
++
++//Get the id of the process form which I am going to receive this tensor
+   const int dst = mpiutils_->GetSourceID(src_task);
+ 
+   Device* dst_device;
++//Get the device to receive from
+   if (s.ok()) {
+-    s = env_->device_mgr->LookupDevice(parsed.dst_device, &dst_device);
+-    CHECK(s.ok()) << "Device lookup failed";
++    	s = env_->device_mgr->LookupDevice(parsed.dst_device, &dst_device);
++    	CHECK(s.ok()) << "Device lookup failed";
+   } else {
+     done(s, Args(), recv_args, Tensor{}, false);
+     return;
+@@ -90,13 +384,37 @@
+     // faults during inter-server transfers...
+     MPI_CHECK(MPI_Alloc_mem(rendezvous_call->request_buffer_size_,
+                             MPI_INFO_NULL, &rendezvous_call->request_buffer_));
++//Everything is Ok. It is the time to serialize the tensor request and send it to the requesting device
+     rendezvous_call->req_.SerializeToArray(
+         rendezvous_call->request_buffer_,
+         rendezvous_call->request_buffer_size_);
++//Use MPI if not using UDP
++
++	int cnt = rendezvous_call->request_buffer_size_;
++
++//	printf("Process %d is going to send a tensor ==request== of size %d \n", proc_id, cnt);
++if(true){
+     MPI_CHECK(MPI_Isend(rendezvous_call->request_buffer_,
+                         rendezvous_call->request_buffer_size_, MPI_CHAR, dst,
+                         TAG_REQTENSOR, MPI_COMM_WORLD,
+                         &rendezvous_call->mpi_request_));
++}else{
++//---------------------------------------------------------------------------------------------------------------------------
++//UDP stuff here.....
++//	printf("At process %d I am going to send a request of size %d \n", proc_id, cnt);
++	if(proc_id == 0){
++		if (sendto(send_req, rendezvous_call->request_buffer_, cnt, 0, (struct sockaddr*) &wrr, sizeof(wrr)) == -1){
++			printf("At process %d error in sendto number %d \n", proc_id, errno);
++			exit(1);
++		}
++	}else{
++		if (sendto(send_req, rendezvous_call->request_buffer_, cnt, 0, (struct sockaddr*) &srr, sizeof(srr)) == -1){
++			printf("At process %d error in sendto number %d \n", proc_id, errno);
++			exit(1);
++		}
++	}//end if proc_id = 0
++}//if (!udp)
++//---------------------------------------------------------------------------------------------------------------------------
+   };
+ 
+   // Create the function which is called when the Tensor is send by remote
+@@ -104,22 +422,29 @@
+   rendezvous_call->recv_call_ =
+       [this, parsed, recv_args, done, dst, temp1,
+        rendezvous_call](MPIRecvTensorResponse mpi_response) {
++//		printf("At process %d recv_call first line \n", proc_id);
+         Status s;
+         Device* dst_device;
++//		printf("Checking status\n");
++//		printf("Status Ok? %d \n", s.ok());
+         if (s.ok()) {
+-          s = env_->device_mgr->LookupDevice(parsed.dst_device, &dst_device);
++         		s = env_->device_mgr->LookupDevice(parsed.dst_device, &dst_device);
++//			printf("s is OK? %d\n", s.ok());
+           CHECK(s.ok()) << "Device lookup failed";
+         }
+-
++		
+         VLOG(3) << "MPI Received tensor " << parsed.FullKey()
+                 << " @ step: " << temp1
+                 << " single-send: " << mpi_response.singlesend();
+ 
++//			
+         Tensor val;
+-        if (mpi_response.singlesend()) {
++        if (mpi_response.singlesend()) {	
++//			
+           dst_device->MakeTensorFromProto(mpi_response.response().tensor(),
+                                           recv_args.alloc_attrs, &val);
+         } else {
++//		
+           TensorResponse tr;
+           tr.InitAlloc(dst_device, recv_args.alloc_attrs);
+           tr.InitPartial(mpi_response.response());
+@@ -130,15 +455,17 @@
+                              TAG_SENDTENSOR2, MPI_COMM_WORLD, &status));
+           val = std::move(tr.tensor());
+         }
+-
++//		
+         done(s, Args(), recv_args, val, mpi_response.response().is_dead());
++//		
+       };
+ 
++//Putting the request call in the SendQueue and wait for the background thread to serve it
+   MPIRendezvousMgr* mgr =
+       reinterpret_cast<MPIRendezvousMgr*>(this->rendezvous_mgr_);
+   mgr->QueueRequest(parsed.FullKey().ToString(), step_id_,
+                     std::move(request_call), rendezvous_call);
+-}
++} //End of recvRemoteAsync
+ 
+ MPIRemoteRendezvous::~MPIRemoteRendezvous() {}
+ 
+@@ -148,15 +475,16 @@
+  * be called once the Tensor data has arrived and is
+  * ready to be send to the remote requester.
+  */
++int sent_packets=0;
+ void MPIRendezvousMgr::AddRequest(RecvTensorRequest request,
+                                   const int mpi_dst) {
+   TF_CHECK_OK(recv_tensor_recent_request_ids_.TrackUnique(
+       request.request_id(), "RecvTensor (MPIRendezvousMgr)", request));
+   const int64 step_id = request.step_id();
+   const std::string& key = request.rendezvous_key();
++//	printf("At process %d BEFORE SEND CALLBACK CREATE step_id is %lld and key is %s \n", proc_id, step_id, key.c_str());
+   Rendezvous::ParsedKey parsed;
+   TF_CHECK_OK(Rendezvous::ParseKey(key, &parsed));
+-
+   MPIRecvTensorCallBack send_cb = [this, mpi_dst, parsed](
+                                       const Status& status,
+                                       const Rendezvous::Args& send_args,
+@@ -168,17 +496,143 @@
+         << "Buffer too large for single transfer";
+     MPI_CHECK(MPI_Alloc_mem(mpi_send_call->mRes_.ByteSize(), MPI_INFO_NULL,
+                             &mpi_send_call->send_buffer_));
++
++//Everything is OK: I am going to send the tensor data to the requester!!
+     mpi_send_call->mRes_.SerializeToArray(mpi_send_call->send_buffer_,
+                                           mpi_send_call->mRes_.ByteSize());
+-
+-    MPI_CHECK(MPI_Isend(mpi_send_call->send_buffer_,
+-                        static_cast<int>(mpi_send_call->mRes_.ByteSize()),
++/*From the MPI documentation:
++int MPI_Isend(const void *buf, int count, MPI_Datatype datatype, int dest,
++    int tag, MPI_Comm comm, MPI_Request *request)
++*/
++		int cnt = static_cast<int>(mpi_send_call->mRes_.ByteSize());
++//	printf("At process %d Will send now the tensor of size %d key is %s \n", proc_id, cnt, mpi_send_call->mRes_.key().c_str());
++int data = -1;
++std::string key = mpi_send_call->mRes_.key();
++//int index = key.find("linear_model");
++if((proc_id != 0) && (proc_id < num_udp_workers+1) && (cnt > 1000000) && mpi_dst == 0)		//Send only big tensors that goes to all workers (other than chief)
++	data = 1;
++
++//	int data = key.find("linear_model");
++//	if (data > 0)
++//		printf("At process %d  buffer size is %d \n", proc_id, cnt);
++if(udp == false || data < 0){
++	if(mpi_dst == 0){	//if it is not the PS (it is a worker), it should sign its message..this is the combined mode..send msg+signature
++		unsigned char* signed_message = new unsigned char[crypto_sign_BYTES + cnt];
++		unsigned long long signed_message_len;
++		crypto_sign(signed_message, &signed_message_len, reinterpret_cast<unsigned char *> (mpi_send_call->send_buffer_), cnt, sk);
++		MPI_CHECK(MPI_Isend(signed_message,
++                        signed_message_len,
++                        MPI_CHAR, mpi_dst, TAG_SENDTENSOR, MPI_COMM_WORLD,
++                        &(mpi_send_call->msg1_)));
++                MPI_CHECK(MPI_Wait(&(mpi_send_call->msg1_),MPI_STATUS_IGNORE));
++		delete signed_message;
++	}else{
++   		 MPI_CHECK(MPI_Isend(mpi_send_call->send_buffer_,
++                        cnt,
+                         MPI_CHAR, mpi_dst, TAG_SENDTENSOR, MPI_COMM_WORLD,
+                         &(mpi_send_call->msg1_)));
+-    MPI_CHECK(MPI_Test(&mpi_send_call->msg1_, &mpi_send_call->done1_,
++	}
++     MPI_CHECK(MPI_Test(&mpi_send_call->msg1_, &mpi_send_call->done1_,
+                        MPI_STATUS_IGNORE));
+-
+-    if (!mpi_send_call->mRes_.singlesend()) {
++}else{
++//---------------------------------------------------------------------------------------------------------------------------
++//UDP stuff here.....
++        //now reply the client with the same data
++//		printf("At process %d Sending tensor of the key:: %s  buffer size is %d \n", proc_id, key.c_str(), cnt);
++
++	if (proc_id == 0){
++		if(cnt > 1500){
++			int md = cnt - 6422000;		//data len is almost 1M so, I am sending the rest (which should be metadata)
++//			printf("Going to send some metadata + data later to the destination number: %d \n", mpi_dst);
++   // 		MPI_CHECK(MPI_Send(mpi_send_call->send_buffer_,
++     //                   md,
++       //                 MPI_CHAR, mpi_dst, TAG_SENDTENSOR_MD, MPI_COMM_WORLD));
++//			int res = sendto(send_data,mpi_send_call->send_buffer_,md,0,(struct sockaddr*) &wrd, sizeof(wrd));	//Use the same socket to send over UDP
++			int res = send(workers[mpi_dst].worker_tcp_socket, mpi_send_call->send_buffer_,md,0);
++//			if(res > 0) printf("Sent metadata of size %d \n", res);
++			char ack[3];
++			res = recv(workers[mpi_dst].worker_tcp_socket, ack,3,0);
++//			if(res  == 3) printf("received ack :) \n");
++			cnt-=md;
++			int start = md, step=65000, num_iter= (cnt/step)+1, cur_iter=0;
++//			char buf[step];
++//			usleep(1000);
++			while(cur_iter != num_iter){
++				if(cur_iter == num_iter - 1){
++					step = cnt%step;
++				}
++//				memcpy(buf, mpi_send_call->send_buffer_+start,step);
++	   			if (sendto(send_data, mpi_send_call->send_buffer_+start, step, 0, (struct sockaddr*) &(workers[mpi_dst].wrd), sizeof(workers[mpi_dst].wrd)) == -1){
++					printf("error in sending 65000 bytes");
++	        			exit(1);
++				}
++//				else
++//					printf("sent data: %d bytes current iteration: %d/%d\n", start, cur_iter,num_iter);
++				sent_packets++;
++				start+=step;
++				cur_iter++;
++//				printf("sleep for 50 us\n");
++				usleep(40);
++			}
++		}else{
++	        	 if (sendto(send_data, mpi_send_call->send_buffer_, cnt, 0, (struct sockaddr*) &wrd, sizeof(wrd)) == -1){
++        	                printf("At process %d error in sendto: %d", proc_id, errno);
++                	        exit(1);
++            		    }
++
++		}
++         printf("Sent packets till now is %d \n", sent_packets);
++	}else{
++//                printf ("At the worker, going to send %d bytes over UDP\n", cnt);
++                if(cnt > 1500){
++                        int md = cnt%1000;         //data len is almost 1M so, I am sending the rest (which should be metadata)
++			//Signing the metadata so that the server can make sure I am a real client
++	                unsigned char* signed_message = new unsigned char[crypto_sign_BYTES + md];
++        	        unsigned long long signed_message_len;
++               		crypto_sign(signed_message, &signed_message_len, reinterpret_cast<unsigned char *> (mpi_send_call->send_buffer_), md, sk);
++                        int res = send(recv_data_tcp, signed_message,signed_message_len,0);
++//                      printf ("result of sending metadata is %d errno = %d (if exists)\n", res, errno);
++                        char ack[3];
++                        res = recv(recv_data_tcp, ack,3,0);
++                        res = send(recv_data_tcp, (const char*)&cnt,4,0);
++                        res = recv(recv_data_tcp, ack,3,0);
++			delete signed_message;
++//                        printf ("result of receiving ack is %d \n", res);
++                        cnt-=md;
++                        int start = md, step=65000, num_iter= (cnt/step)+1, cur_iter=0;
++                        while(cur_iter != num_iter){
++                                if(cur_iter == num_iter - 1){
++                                        step = cnt%step;
++                                }
++				//Send position of this packet with the packet itself....this is sort of reliability we provide where UDP cannot provide
++	                        unsigned char* signed_message = new unsigned char[crypto_sign_BYTES + step + sizeof(int)];
++				unsigned char* data_to_send = new unsigned char[step + sizeof(int)];
++				memcpy(data_to_send, &start, sizeof(int));
++				memcpy(data_to_send+sizeof(int), reinterpret_cast<unsigned char *> (mpi_send_call->send_buffer_+start), step);
++         	                crypto_sign(signed_message, &signed_message_len, data_to_send/*reinterpret_cast<unsigned char *> (mpi_send_call->send_buffer_+start)*/, step+sizeof(int), sk);
++                                if (sendto(send_data, signed_message, signed_message_len, 0, (struct sockaddr*) &srd, sizeof(srd)) == -1){
++                                        printf("error in sending %d bytes\n", signed_message_len);
++                                        exit(1);
++                                }
++                                sent_packets++;
++                                start+=step;
++                                cur_iter++;
++                                usleep(400);
++				delete signed_message;
++                        }
++                }else{
++                         if (sendto(send_data, mpi_send_call->send_buffer_, cnt, 0, (struct sockaddr*) &srd, sizeof(srd)) == -1){
++                                printf("At process %d error in sendto: %d", proc_id, errno);
++                                exit(1);
++                            }
++
++                }
++	        printf("At process %d sent packets till now is %d \n", proc_id, sent_packets);
++	}	//end if process_id = 0
++//---------------------------------------------------------------------------------------------------------------------------
++}
++//Do not use MPI if UDP is used!
++    if ( udp == false && !mpi_send_call->mRes_.singlesend()) {
+       const int tensor_size = static_cast<int>(val.TotalBytes());
+       void* temp = const_cast<void*>(DMAHelper::base(&val));
+ 
+@@ -186,6 +640,7 @@
+       // here to get the data on the host.
+       // if(src_dev->tensorflow_gpu_device_info()) //memcpy to send_buffer2_
+ 
++//This does not transfer the tensor data itself but just the request
+       // TODO(jbedorf)  this should be a loop over max size
+       MPI_CHECK(MPI_Isend(temp, tensor_size, MPI_CHAR, mpi_dst, TAG_SENDTENSOR2,
+                           MPI_COMM_WORLD, &mpi_send_call->msg2_));
+@@ -193,14 +648,15 @@
+     }
+     return mpi_send_call;
+   };
+-
+   // Wrapper around the read callback to place the callback on our queue
+   Rendezvous::DoneCallback done_cb =
+       [this, parsed, step_id, send_cb](
+           const Status& status, const Rendezvous::Args& send_args,
+           const Rendezvous::Args& recv_args, const Tensor& val, bool is_dead) {
++//		printf("At process %d first line of done callback...status.ok is %d\n", proc_id, status.ok());
+         if (!status.ok()) {
+           CHECK(status.ok())
++			  << "At PROCESS " << proc_id << " "
+               << "RecvLocalAsync was not ok, key: " << parsed.FullKey()
+               << " step: " << step_id
+               << " error message: " << status.error_message();
+@@ -251,15 +707,12 @@
+             n.WaitForNotification();
+           } else {
+             val.AsProtoTensorContent(
+-                mpi_send_call->mRes_.mutable_response()->mutable_tensor());
++                mpi_send_call->mRes_.mutable_response()->mutable_tensor());
+           }
+         }
+-
+         std::function<MPISendTensorCall*()> res = std::bind(
+             send_cb, status, send_args, recv_args, val, is_dead, mpi_send_call);
+-
+         SendQueueEntry req(parsed.FullKey().ToString().c_str(), std::move(res));
+-
+         this->QueueSendRequest(req);
+ 
+         // Wait for the notification that indicates the tensor has been
+@@ -267,49 +720,413 @@
+         // have not parsed the tensor to proto
+         if (doOptimalTransfer) mpi_send_call->n_.WaitForNotification();
+       };  // done_cb
+-
++//	printf("At process %d will schedule done_cb now I guess\n");
+   worker_env_2->compute_pool->Schedule([this, step_id, parsed, done_cb]() {
+     this->RecvLocalAsync(step_id, parsed, done_cb);
+   });
++//	printf("Scheduled\n");
++}
++int dropped_packets;
++void MPIRendezvousMgr::recvTensors(){
++	printf("Starting the recvTensors background\n");
++	dropped_packets=0;
++    // Check for incoming Tensor reply	
++	MPIRecvTensorResponse mRes;
++	bool response, zero, clever = false;
++	const char* clever_en = getenv("CLEVER");
++  	if (clever_en && clever_en[0] == '1')
++		clever=true;
++
++	int BUFLEN = 65000 + crypto_sign_BYTES + sizeof(int);
++        unsigned char* last_big_buff = new unsigned char [57500000];
++        std::fill_n(last_big_buff, 57500000, 0);
++        unsigned char* big_buff = new unsigned char [57500000];
++        std::fill_n(big_buff, 57500000, NAN);
++        unsigned char* new_big_buff = new unsigned char [57500000];
++	int max_buff_len = 57500000;
++	std::vector<int> recvd_idx;
++	int num_iter=0;
++	unsigned char special[65000];
++	unsigned char zeros[65000];
++	bool go_forward = true; 	//this boolean is used to manually shuffle the gradient....try to simulate UDP possible behavior
++/*
++	for(int i=0; i<65000; i+=4){
++                special[i] = 0x7f;//rand()%256;
++                special[i+1] = 0xa0;//rand()%256;
++                special[i+2] = 0x00;//rand()%128;
++                special[i+3] = 0x00;//rand()%128;
++	}
++*/
++        std::fill_n(special, 65000, NAN);
++//	printf("Printing special...\n");
++//	for(int i=0;i<65000;i++)
++//		printf("%d ", special[i]);
++//	printf("\n");
++	std::fill_n(zeros, 65000, 0);
++	int msg_len=0;
++	int num_allModified_tensors = 0;
++        fd_set workerfds;
++	int nan_counter = 0;
++	while(true){
++		response = false;
++		zero = false;
++	//---------------------------------------------------------------------------------------------------------------------------
++		int recv_len = 0;
++		unsigned char* buf = new unsigned char[BUFLEN];
++                int start = 0;
++		bool allModified = true;
++                int worker_rank=0;
++		if(proc_id == 0){				//PS branch... This is deprecated! We do not allow PS to use UDP for sending parameter vector. We allow only workers to do so
++                        socklen_t slen = sizeof(workers[1].wsd);
++			//receive from multiple TCP sockets!
++			FD_ZERO(&workerfds);
++			int max_sd = 0;
++       			for(int i = 1; i<num_workers+1; i++){
++		            FD_SET(workers[i].worker_tcp_socket, &workerfds);
++          		    max_sd = (max_sd>workers[i].worker_tcp_socket)?max_sd:workers[i].worker_tcp_socket;
++       			}
++      			int ret = select(max_sd + 1, &workerfds, NULL, NULL, NULL);
++        		if (ret < 0){
++           			printf("AT PS, select failed \n ");
++            			exit(1);
++       			}
++			int sd;
++       	 		for(int i = 1; i<num_workers+1; i++){
++            			sd = workers[i].worker_tcp_socket;
++            			if (FD_ISSET(sd, &workerfds)){
++			            worker_rank = i;
++				    break;
++				}
++       			 }
++                        int md_len = 1000 + crypto_sign_BYTES;
++                        unsigned char* md = new unsigned char[1000 + crypto_sign_BYTES];
++                        MPI_Status stat;
++                        int rcv_md = -1;
++                        while (rcv_md < 0)
++                                rcv_md = recv(workers[worker_rank].worker_tcp_socket,md,md_len,0);       //recv over UDP instead of MPI
++                        unsigned char* unsigned_message = new unsigned char[rcv_md - crypto_sign_BYTES];              //size of the message is the total received - the signature s$
++                       if(rcv_md <= 0){
++                                printf("Error in receiving... errno is %d \n", errno);
++				continue;
++                        }else{
++                		unsigned long long unsigned_message_len;
++//				printf("PS received %d bytes from worker %d  \n", rcv_md, worker_rank);
++//				if(rcv_md > 939)
++//					printf("RECIEVED > 939 bytes as md !!!!!!!!!!!!!!!!!!1 This is WEIRD\n");
++                		if (crypto_sign_open(unsigned_message, &unsigned_message_len,
++                    			md, rcv_md,workers[worker_rank].pk) != 0) {
++		                        	printf("Incorrect signature detected by the Server...................! I will not accept somthing from this worker\n");
++                        			continue;
++                		}
++//				printf("Received correct md of size %d signed by worker %d \n", unsigned_message_len, worker_rank);
++				md_len = unsigned_message_len;
++			}
++                        send(workers[worker_rank].worker_tcp_socket,"Ack", 3, 0);
++			int res = recv(workers[worker_rank].worker_tcp_socket,&msg_len,4,0);
++                        send(workers[worker_rank].worker_tcp_socket,"Ack", 3, 0);
++                        memcpy(big_buff, unsigned_message, md_len);
++//                        memcpy(new_big_buff, unsigned_message, md_len);
++                        delete unsigned_message;
++			delete md;
++                        start+=md_len;
++                        recv_len = 65000;
++//                        msg_len = 6422000+md_len;
++                        int special_len;
++                        setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++			bool all_zeros=false;
++			int pos = 0;
++                        while(start < msg_len){
++				zero = false;
++//				printf("start is %d, msg_len is %d \n", start, msg_len);
++                                recv_len = recvfrom(recv_data, buf, BUFLEN, 0, (struct sockaddr *) &workers[worker_rank].wsd, &slen);
++                                unsigned char* unsigned_message;
++                                unsigned long long unsigned_message_len;
++				if(recv_len > 0){
++					unsigned_message = new unsigned char[recv_len - crypto_sign_BYTES];
++//					printf("PS received %d bytes as data form worker number %d, now, start is %d \n", recv_len, worker_rank, start);
++	               	                if (crypto_sign_open(unsigned_message, &unsigned_message_len,
++	                                       		 buf, recv_len, workers[worker_rank].pk) != 0) {
++	                                        printf("Incorrect signature detected by the Server....! Dropping this and put zeros\n");
++						zero = true;
++	                                }
++				}
++                                if(recv_len <= 0 || zero == true){
++                                        dropped_packets++;
++                                        special_len=msg_len-start>65000?65000:msg_len-start;
++					if(clever == false)
++						all_zeros=true;
++                                }
++                                else{
++                                        allModified = false;
++                                }
++                                if(recv_len > 0 && zero == false){		//packet reached and not malformed
++					pos = unsigned_message[3] << 24 | unsigned_message[2] << 16 | unsigned_message[1] << 8 | unsigned_message[0];
++	                                memcpy(big_buff+pos/*start*/, unsigned_message+sizeof(int), unsigned_message_len-sizeof(int));
++//					printf("Pos is %d start is %d\n", pos, start);
++                                        start+=(unsigned_message_len-sizeof(int));
++                                }else{
++//					if(zero)
++//						memcpy(big_buff+start, zeros, special_len);
++//					else
++  //                                      	memcpy(big_buff+start, special, special_len);
++					if (clever){
++						memcpy(big_buff+start, last_big_buff+start, special_len);
++						printf("Replacing the unreceived part with the latest one I have!\n");
++					}else{
++//						printf("Start is %d \n", start);
++					        memcpy(big_buff+start, /*last_big_buff*/special, special_len);
++						nan_counter++;
++						printf("Putting NaNs.....gradients not received from worker %d \n", worker_rank);
++					}
++                                        start+=special_len;
++                                }
++				if (recv_len > 0)
++					delete unsigned_message;
++                        }
++                        setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &remove_timeout, sizeof remove_timeout);
++                        if (allModified == true)
++                                num_allModified_tensors++;
++                        printf("At process %d Number of modified tensors is %d \n", proc_id, num_allModified_tensors);
++                        if(start > 0){
++                                response = true;
++                        }
++			//If I use innocuous values for the whole gradient! Ok other nodes should drive model to converge anyway..should work but slow.
++			if(all_zeros){
++//				printf("Drop the whole gradient! Put all zeros from index %d to index %d \n", md_len, msg_len);
++//				memcpy(big_buff+md_len-704, last_big_buff, msg_len-md_len+710);
++			}
++			printf("Inside networking layer, nan_counter is %d \n", nan_counter);
++		}else{
++			socklen_t slen = sizeof(ssd);
++			int md_len = 800;
++			char md[800];
++			MPI_Status stat;
++			int rcv_md = -1;
++			while (rcv_md < 0)
++				rcv_md = recv(recv_data_tcp,md,md_len,0);	//recv over UDP instead of MPI
++			if(rcv_md <= 0)
++				printf("Error in receiving... errno is %d \n", errno);
++			else
++				md_len = rcv_md;
++			send(recv_data_tcp,"Ack", 3, 0);
++			memcpy(big_buff, md, md_len);
++			start+=md_len;
++			recv_len = 65000;
++			msg_len = 6422000+md_len;
++			int special_len;
++			setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &read_timeout, sizeof read_timeout);
++			while(start < 6422000){
++				recv_len = recvfrom(recv_data, buf, BUFLEN, 0, (struct sockaddr *) &ssd, &slen);
++				if (recv_len < 1000 && recv_len > 0)
++					printf("======================= Received very small packet........This should be a metadata I guesss !!!!!!\n");
++				if(recv_len <= 0){
++					dropped_packets++;
++					special_len=msg_len-start>65000?65000:msg_len-start;
++				}
++				else{
++					allModified = false;
++				}
++
++				if(recv_len > 0){
++					recv_len = msg_len - start >65000?recv_len:msg_len - start;		//This hack limits the last chunk to the small size so we do not go out of memory bounds
++					memcpy(big_buff+start, buf, recv_len);
++					start+=recv_len;
++				}else{
++					memcpy(big_buff+start, special, special_len);
++					start+=special_len;
++				}
++			}
++                        setsockopt(recv_data, SOL_SOCKET, SO_RCVTIMEO, &remove_timeout, sizeof remove_timeout);
++			if (allModified == true)
++				num_allModified_tensors++;
++			printf("At process %d Number of modified tensors is %d \n", proc_id, num_allModified_tensors);
++			if(start > 0){
++				response = true;
++			}
++		}
++		num_iter++;
++		//This part is the MPI part...parse the received buffer into MPIRecvTensorResponse and do the correct calls
++		bool parsed = false;
++ 		if(response == true){
++			//getting the maximum coordinates in big_buff
++//			printf("Printing big numbers in big_buff now!!! stay tuned \n");//			for(int i=md_len-704; i<start; i++){
++//				if(big_buff[i] >= 100)
++//					printf("Index %d , Number %d \n", i, big_buff[i]);
++//			}
++			//shuffling now....
++/*
++			int rem = (start-875)%65000;
++			int first = 174, last = start - 65000 - rem - 1;
++			printf("first is %d last is %d \n", first, last);
++//			int shuffle_times = (last-first)/65000;
++//			for(int i=0;i<shuffle_times;i++){
++//				int original = first + (i*65000);
++//				int new_pos = last - (i*65000);
++//				memcpy(new_big_buff+new_pos, big_buff+original, 65000);
++//			}
++			int size = (start-174)/4;
++			float * to_shuffle = new float[size];
++			memcpy(to_shuffle, new_big_buff + 174, size*4);
++			unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
++			shuffle(to_shuffle, to_shuffle + size, std::default_random_engine(seed));
++			memcpy(new_big_buff+174, to_shuffle, size*4);
++			//getting the eucledian distance...
++			double AdotB = 0.0, normA=0.0, normB=0.0;
++			double euc_dist = 0.0;
++			double diff = 0.0;
++			double maxDiff = 0.0;
++			for(int i=202;i<start;i+=4){
++//				printf("big_buff content: %u %u %u %u \n", (unsigned char)big_buff[i], (unsigned char)big_buff[i+1], (unsigned char)big_buff[i+2], (unsigned char)big_buff[i+3]);
++//                              printf("new_big_buff content: %u %u %u %u \n",(unsigned char) new_big_buff[i], (unsigned char)new_big_buff[i+1], (unsigned char)new_big_buff[i+2], (unsigned char)new_big_buff[i+3]);
++				unsigned int first = ((unsigned int)big_buff[i] << 24) | ((unsigned int)big_buff[i+1] << 16) | ((unsigned int)big_buff[i+2] << 8) | (unsigned int)big_buff[i+3];
++                                unsigned int second = ((unsigned int)new_big_buff[i] << 24) | ((unsigned int)new_big_buff[i+1] << 16) | ((unsigned int)new_big_buff[i+2] << 8) | (unsigned int)new_big_buff[i+3];
++//				float* firstt = reinterpret_cast<float*>(&first);
++//                              float* secondd = reinterpret_cast<float*>(&second);
++				float firstt = *(float *)&first;
++                                float secondd = *(float *)&second;
++//                              printf("Index %d , first is %d, second is %d \n", i, first, second);
++//				printf("Index %d , big_buff is %.9f, new_big_buff is %.9f \n", i, firstt, secondd);
++				AdotB += firstt * secondd;
++				normA += firstt * firstt;
++				normB += secondd * secondd;
++				diff = abs(firstt - secondd);
++				euc_dist += diff * diff;
++				if(diff > maxDiff)
++					maxDiff = diff;
++			}
++			double cos_sim = AdotB / (sqrt(normA)*sqrt(normB));
++			euc_dist = sqrt(euc_dist);
++                        printf("Max Differnece between two entries %lf \n", maxDiff);
++			printf("AdotB is %lf, normA is %lf, normB is %lf \n", AdotB, sqrt(normA), sqrt(normB));
++			printf("Cosine similarity is %lf and Eucledian distance is %lf \n", cos_sim, euc_dist);
++*/
++			printf("Parsing data from worker %d \n", worker_rank);
++                        parsed = mRes.ParseFromArray(big_buff,msg_len/*start*/);
++			if(parsed == false)
++				printf("Parsed == false!! \n");
++//			parsed = mRes.ParseFromArray(new_big_buff,start);
++//			printf("Parsed = %d \n", parsed);
++//			if(parsed)
++//				memcpy(last_big_buff, big_buff, start);		//This is a successfull example, I am keeping it :))
++//			else
++//				printf("Parsed == false!!! \n");
++		}
++		response = parsed;	//if not parsed, the response is useless!!
++		if(response == true){
++			  const int64 step_id = mRes.step_id();
++			  std::string key = mRes.key();
++			  std::shared_ptr<MPIRequestTensorCall> call;
++			  if(GetRecvCall(step_id, key, &call) == true){
++				  call->recv_call_(mRes);
++			  	  RemoveRecvCall(step_id, key);
++			   }else{
++					response = false;	//if recv_call = true
++			   }
++		}
++		printf("At process %d number of modified fragments is %d \n", proc_id, dropped_packets);
++		delete buf;
++	}
+ }
+ 
+-void MPIRendezvousMgr::MPIBackgroundThread() {
+-  std::list<std::unique_ptr<MPISendTensorCall>> active_sends;
+-
+-  while (1) {
+-    MPI_Status status;
+-
+-    // Check for incoming Tensor requests
++void MPIRendezvousMgr::recvTensorReqs(){
+     RecvTensorRequest request;
+-    if (ProbeForData(TAG_REQTENSOR, &status, &request)) {
+-      this->AddRequest(request, status.MPI_SOURCE);
+-    }
++    // Check for incoming Tensor requests
++	while(true){
++	//---------------------------------------------------------------------------------------------------------------------------
++		//UDP Recv here!!
++		int recv_len = 0, BUFLEN = 2048;
++		char buf[BUFLEN];
++		if (proc_id == 0){
++			socklen_t slen = sizeof(wsr);
++			recv_len = recvfrom(recv_req, buf, BUFLEN, 0, (struct sockaddr *) &wsr, &slen);
++			if(recv_len > 0){	
++				bool parsed = request.ParseFromArray(buf,recv_len);
++				if(parsed){
++					this->AddRequest(request, 1);		//TODO: Change this! ---the MPI Source is always the worker in this case which always has the rank 0
++				}
++			}//end if recv_len > 0	//TODO: here we want to put deliver any garbage if nothing is received
++		}else{
++			socklen_t slen = sizeof(ssr);
++			recv_len = recvfrom(recv_req, buf, BUFLEN, 0, (struct sockaddr *) &ssr, &slen);
++			if(recv_len > 0){
++				bool parsed = request.ParseFromArray(buf,recv_len);
++				if(parsed){
++					this->AddRequest(request, 0);		//TODO: Change this! ---the MPI Source is always the worker in this case which always has the rank 0
++				}
++			}//end if recv_len > 0
++		}//end if proc_id == 0
++	//---------------------------------------------------------------------------------------------------------------------------
++	}
++}
+ 
+-    // Check for incoming Tensor reply
+-    MPIRecvTensorResponse mRes;
+-    if (ProbeForData(TAG_SENDTENSOR, &status, &mRes)) {
+-      const int64 step_id = mRes.step_id();
+-      std::string key = mRes.key();
+-
+-      std::shared_ptr<MPIRequestTensorCall> call;
+-      GetRecvCall(step_id, key, &call);
+-      call->recv_call_(mRes);
+-      RemoveRecvCall(step_id, key);
++  template <typename T>
++  int ProbeForData(const int tag, MPI_Status* status, T* obj) {
++    int flag = 0, msg_size = 0;
++    MPI_Message msg;
++    // Receive the message, probe as size is variable
++    MPI_CHECK(
++        MPI_Improbe(MPI_ANY_SOURCE, tag, MPI_COMM_WORLD, &flag, &msg, status));
++    if (flag) {
++      MPI_CHECK(MPI_Get_count(status, MPI_CHAR, &msg_size));
++      MPI_Status stat2;
++      unsigned char* request_buffer_ = new unsigned char[msg_size];
++      MPI_Mrecv(request_buffer_, msg_size, MPI_CHAR, &msg, &stat2);
++      bool res;
++        //first of all, remove the signature if I am the server...this should be checked for the signature...
++	if(tag == TAG_SENDTENSOR && proc_id == 0){
++      		unsigned char* unsigned_message = new unsigned char[msg_size - crypto_sign_BYTES];		//size of the message is the total received - the signature size
++       		unsigned long long unsigned_message_len;
++       		if (crypto_sign_open(unsigned_message, &unsigned_message_len,
++                    reinterpret_cast<const unsigned char *> (request_buffer_), msg_size,workers[status->MPI_SOURCE].pk) != 0) {
++           		printf("Incorrect signature detected by the Server...................! I will not accept somthing from this worker\n");
++			return 0;
++    		}
++		res = obj->ParseFromArray(unsigned_message, unsigned_message_len);
++		delete unsigned_message;
++	}else{
++      		res = obj->ParseFromArray(request_buffer_, msg_size);
++	}
++      CHECK(res) << "Failed to parse incomming message";
+     }
++    return flag;
++  }
+ 
+-    // Remove sends that have been completed
+-    active_sends.remove_if(
+-        [](std::unique_ptr<MPISendTensorCall>& i) { return i->IsFinished(); });
++//The main thread.
++void MPIRendezvousMgr::MPIBackgroundThread() {
++  std::list<std::unique_ptr<MPISendTensorCall>> active_sends;
++
++  while (1) {
++	MPI_Status status;
++	RecvTensorRequest request;
++	MPIRecvTensorResponse mRes;
++	if (ProbeForData(TAG_REQTENSOR, &status, &request)) {
++	  this->AddRequest(request, status.MPI_SOURCE);
++	}
++	if (ProbeForData(TAG_SENDTENSOR, &status, &mRes)) {
++		  const int64 step_id = mRes.step_id();
++		  std::string key = mRes.key();
++		  std::shared_ptr<MPIRequestTensorCall> call;
++		  if(GetRecvCall(step_id, key, &call) == true){
++			  call->recv_call_(mRes);
++		  	  RemoveRecvCall(step_id, key);
++		   }	//if recv_call = true
++	}
++    	// Remove sends that have been completed
++	if(proc_id == 0)	//This is a hack....only PS may leak memory...others should be fine
++		active_sends.remove_if(
++    			[](std::unique_ptr<MPISendTensorCall>& i) { return i->IsFinished(); });
+ 
+-    // send a Tensor request
++    // send a Tensor request	
+     RequestQueueEntry req;
+-    if (GetRequest(&req)) req.second();
++    if (GetRequest(&req)){ req.second();}
+ 
+-    // Send a Tensor response
++    // Send a Tensor response	
+     SendQueueEntry send;
+     if (GetResponse(&send)) {
+       std::unique_ptr<MPISendTensorCall> p(send.second());
+       active_sends.push_back(std::move(p));
++		if(udp && proc_id != 0)
++			active_sends.remove(p);
+     }
+ 
+     //    std::this_thread::sleep_for(std::chrono::microseconds(1));
+@@ -317,4 +1134,6 @@
+ }
+ 
+ }  // namespace tensorflow
+-#endif  // TENSORFLOW_USE_MPI
++#endif  // TENSORFLOW_USE_MPI/* Copyright 2017 The TensorFlow Authors. All Rights Reserved.
++
++

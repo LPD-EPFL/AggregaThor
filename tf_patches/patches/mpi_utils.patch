@@ -1,0 +1,61 @@
+ # @file   mpi_utils.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the mpi_utils.cc file to support UDP as a transport protocol.
+
+--- old/tensorflow/tensorflow/contrib/mpi/mpi_utils.cc	2019-01-21 10:48:13.321658568 +0100
++++ tensorflow/tensorflow/contrib/mpi/mpi_utils.cc	2019-01-21 10:51:50.986903428 +0100
+@@ -42,7 +42,7 @@
+   for (int i = 0; i < number_of_procs; i++) {
+     name_to_id_[std::string(&worker_names[i * 128])] = i;
+     if (proc_id == 0)
+-      LOG(INFO) << "Process: " << i
++      LOG(INFO) << "Process: " << i
+                 << "\tgRPC-name: " << std::string(&worker_names[i * 128])
+                 << std::endl;
+   }
+@@ -60,11 +60,19 @@
+     MPI_CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &proc_id));
+     MPI_CHECK(MPI_Comm_size(MPI_COMM_WORLD, &number_of_procs));
+     MPI_CHECK(MPI_Get_processor_name(my_host_name, &len));
++	hostname = new char[len];
++	memset((void*)hostname,0,len);
++	memcpy((void*)hostname,my_host_name,len);
++//	hostname = my_host_name;
++//	std::string str(hostname);
++	printf("My hostname is %s \n", hostname);
+     fprintf(stderr,
+-            "MPI Environment initialized. Process id: %d Total processes: %d "
++            "MPI Environment initialized. Process id: %d Total processes: %d "
+             "|| Hostname: %s \n",
+             proc_id, number_of_procs, my_host_name);
+   }
++fprintf(stderr,
++        	"Initializing....\n");
+ }
+ 
+ }  // namespace tensorflow

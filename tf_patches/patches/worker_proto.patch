@@ -1,0 +1,57 @@
+ # @file   worker_proto.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the worker_proto file to reorder the tensor content so that metadata is sent reliably and data are sent over UDP.
+
+--- old/tensorflow/tensorflow/core/protobuf/worker.proto	2019-01-21 10:50:52.742559936 +0100
++++ tensorflow/tensorflow/core/protobuf/worker.proto	2019-01-21 10:51:51.146904379 +0100
+@@ -323,19 +323,20 @@
+ }
+ 
+ message RecvTensorResponse {
+-  // The tensor as a proto.
+-  TensorProto tensor = 1;
+ 
+   // If true, this tensor was the output of a dead node, and the
+   // content is invalid.
+-  bool is_dead = 2;
++  bool is_dead = 1;
+ 
+   // The time at which tensor was available and started to be returned.
+-  int64 send_start_micros = 3;
++  int64 send_start_micros = 2;
+ 
+   // Optional additional information about how to receive the tensor,
+   // e.g. in the event that `RecvTensorRequest.dma_ok` was true.
+-  google.protobuf.Any transport_options = 4;
++  google.protobuf.Any transport_options = 3;
++
++  // The tensor as a proto.
++  TensorProto tensor = 4;
+ }
+ 
+ ////////////////////////////////////////////////////////////////////////////////

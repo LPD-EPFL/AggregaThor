@@ -1,0 +1,88 @@
+ # @file   grpc_channel.patch
+ # @author Arsany Guirguis <arsany.guirguis@epfl.ch>
+ #
+ # @section LICENSE
+ #
+ # Copyright © 2018-2019 Arsany Guirguis.
+ #
+ # Permission is hereby granted, free of charge, to any person obtaining a copy
+ # of this software and associated documentation files (the "Software"), to deal
+ # in the Software without restriction, including without limitation the rights
+ # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ # copies of the Software, and to permit persons to whom the Software is
+ # furnished to do so, subject to the following conditions:
+ #
+ # The above copyright notice and this permission notice shall be included in all
+ # copies or substantial portions of the Software.
+ #
+ # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ # SOFTWARE.
+ #
+ # @section DESCRIPTION
+ #
+ # This patches the grpc_channel file to allow for secure gRPC channels.
+
+--- old/tensorflow/tensorflow/core/distributed_runtime/rpc/grpc_channel.cc	2019-01-21 10:50:52.582559001 +0100
++++ tensorflow/tensorflow/core/distributed_runtime/rpc/grpc_channel.cc	2019-01-21 10:51:51.110904165 +0100
+@@ -20,6 +20,7 @@
+ #include <unordered_map>
+ 
+ #include "grpc++/create_channel.h"
++#include "grpc++/security/credentials.h"
+ 
+ #include "tensorflow/core/lib/core/errors.h"
+ #include "tensorflow/core/lib/core/status.h"
+@@ -33,7 +34,7 @@
+ #include "tensorflow/core/platform/thread_annotations.h"
+ #include "tensorflow/core/platform/types.h"
+ #include "tensorflow/core/util/device_name_utils.h"
+-
++#include <fstream>
+ namespace tensorflow {
+ 
+ namespace {
+@@ -55,6 +56,14 @@
+ }
+ }  // namespace
+ 
++static std::string get_file_contents(const char *fpath)
++{
++  std::ifstream finstream(fpath);
++  std::string contents((std::istreambuf_iterator<char>(finstream)),
++                       std::istreambuf_iterator<char>());
++  return contents;
++}
++
+ Status NewHostPortGrpcChannel(const string& target,
+                               SharedGrpcChannelPtr* channel_pointer) {
+   // Minimally ensure that the target is valid
+@@ -65,9 +74,23 @@
+   args.SetInt(GRPC_ARG_MAX_MESSAGE_LENGTH, std::numeric_limits<int32>::max());
+   // NOTE(mrry): Some versions of gRPC use a 20-second minimum backoff
+   // on connection failure, which makes our tests time out.
+-  args.SetInt("grpc.testing.fixed_reconnect_backoff_ms", 1000);
++//  args.SetInt("grpc.testing.fixed_reconnect_backoff_ms", 1000);
++  const char* sgrpc = getenv("SECURE_GRPC");
++  if (sgrpc && sgrpc[0] == '1') {
++	//Doing authentication at gRPC level
++  	grpc::SslCredentialsOptions options;
++  	options.pem_root_certs = get_file_contents("/usr/share/grpc/roots.pem");
++  	options.pem_private_key = get_file_contents("/usr/share/grpc/clkey.pem");
++  	options.pem_cert_chain = get_file_contents("/usr/share/grpc/clcert.pem");
++
++  	auto channel_creds = grpc::SslCredentials(options);
++  	*channel_pointer = grpc::CreateCustomChannel(
++      		"dns:///" + target, channel_creds, args);
++  	printf("Starting a secure channel .............................................................................\n");
++   }else{
+   *channel_pointer = ::grpc::CreateCustomChannel(
+       "dns:///" + target, ::grpc::InsecureChannelCredentials(), args);
++}
+   return Status::OK();
+ }
+ 
