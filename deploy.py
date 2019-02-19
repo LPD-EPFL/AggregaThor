@@ -211,7 +211,17 @@ def deploy_one(host, cluster, node_job, node_id):
     args = ["ssh", host, sys.executable]
     handler = subprocess.Popen(args, stdin=subprocess.PIPE)
     exit_callbacks.append(lambda *args, **kwargs: handler.terminate())
-  cmd = ("import sys; sys.argv = [\"\", \"--cluster\", " + repr(cluster_repr) + ", " + ("\"--nice\", " if node_job in nices else "") + "\"--id\", " + repr(node_job + ":" + str(node_id)) + "," + ("\"--MPI\"" if mpi else "") + "];" + os.linesep).encode()
+
+  # Need to propogate path to TensorFlow if installed in a user space or unusual path
+  pythonpath=os.environ.get('PYTHONPATH','')
+  syspaths=''
+  syspaths_added=[]
+  for pp in pythonpath.split(':'):
+      if pp!='' and pp not in syspaths_added:
+         syspaths+="sys.path.append('"+pp+"'); "
+         syspaths_added.append(pp)
+
+  cmd = ("import sys; "+syspaths+" sys.argv = [\"\", \"--cluster\", " + repr(cluster_repr) + ", " + ("\"--nice\", " if node_job in nices else "") + "\"--id\", " + repr(node_job + ":" + str(node_id)) + "," + ("\"--MPI\"" if mpi else "") + "];" + os.linesep).encode()
   if not mpi:
     handler.stdin.write(cmd)
     handler.stdin.write(src)
