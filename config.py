@@ -44,7 +44,7 @@ default_wk_job_name = "workers"
 default_ev_job_name = "eval"
 
 # Training
-default_max_steps         = 10000
+default_max_step          = 10000
 default_learning_rate     = 1e-3
 default_end_learning_rate = 1e-4
 default_decay_step        = 10000

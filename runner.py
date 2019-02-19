@@ -34,6 +34,7 @@
 
 if __name__ != "__main__":
   raise tools.UserException("Script " + repr(__file__) + " is to be used as the main module only")
+
 import tools
 tools.success("Python module loading phase...")
 
@@ -60,6 +61,7 @@ import graph
 # Graceful termination
 
 exit_pending = False
+
 def mark_exit(*args, **kwargs):
   """ Simply mark exit as pending.
   """
@@ -151,9 +153,9 @@ parser.add_argument("--attack",
 parser.add_argument("--attack-args",
   nargs="*",
   help="Additional arguments to pass to the underlying attack (ignored if --nb-real-byz-workers is 0)")
-parser.add_argument("--max-steps",
+parser.add_argument("--max-step",
   type=int,
-  default=config.default_max_steps,
+  default=config.default_max_step,
   help="Number of additional steps to perform before stopping the training, non-positive for no limit")
 parser.add_argument("--checkpoint-dir",
   type=str,
@@ -299,7 +301,7 @@ if exit_pending:
 # ---------------------------------------------------------------------------- #
 # Cluster management
 tools.success("Cluster analysis and allocation phase...")
-sys.stdout.flush()
+
 with tools.Context("cluster", "info"):
   # Cluster manager instantiation
   if args.server: # Assume the role of the parameter server, which allows the use of 'tf.py_func'
@@ -547,8 +549,8 @@ with graph_mgr.graph.as_default():
       # Actual training
       tools.success("Actual training...")
       def gen():
-        if args.max_steps > 0:
-          for step in range(args.max_steps):
+        if args.max_step > 0:
+          for step in range(args.max_step):
             yield step
         else:
           step = 0

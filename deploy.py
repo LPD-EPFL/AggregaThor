@@ -276,7 +276,6 @@ def deploy_all(cluster, this_job, this_id):
 # TensorFlow server
 
 def server_as(cluster, node_job, node_id):
-  global mpi
   """ Create and start a TF cluster server.
   Args:
     cluster  Full cluster specification
