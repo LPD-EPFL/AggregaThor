@@ -101,13 +101,13 @@ class SlimExperiment(_Experiment):
         network_fn = nets_factory.get_network_fn(self.__model, num_classes=(dataset.num_classes - self.__args["labels-offset"]), weight_decay=self.__args["weight-decay"], is_training=True)
       # Create a dataset provider that loads data from the dataset
       with tf.device(device_dataset):
-        provider = slim.dataset_data_provider.DatasetDataProvider(dataset, num_readers=self.__args["nb-fetcher-threads"], common_queue_capacity=(20 * self.__args["batch-size"]), common_queue_min=(10 * self.__args["batch-size"]))
+        provider = tf.contrib.slim.dataset_data_provider.DatasetDataProvider(dataset, num_readers=self.__args["nb-fetcher-threads"], common_queue_capacity=(20 * self.__args["batch-size"]), common_queue_min=(10 * self.__args["batch-size"]))
         [image, label] = provider.get(["image", "label"])
         label -= self.__args["labels-offset"]
         image = preproc_fn(image, network_fn.default_image_size, network_fn.default_image_size)
         images, labels = tf.train.batch([image, label], batch_size=self.__args["batch-size"], num_threads=self.__args["nb-batcher-threads"], capacity=(5 * self.__args["batch-size"]))
-        labels = slim.one_hot_encoding(labels, dataset.num_classes - self.__args["labels-offset"])
-        batch_queue = slim.prefetch_queue.prefetch_queue([images, labels], capacity=(2 * len(device_models)))
+        labels = tf.contrib.slim.one_hot_encoding(labels, dataset.num_classes - self.__args["labels-offset"])
+        batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue([images, labels], capacity=(2 * len(device_models)))
     # Model definitions and loss computations
     losses = []
     with tf.variable_scope("shared", reuse=tf.AUTO_REUSE):
@@ -119,8 +119,8 @@ class SlimExperiment(_Experiment):
             images, labels = batch_queue.dequeue()
             logits, end_points = network_fn(images)
             if "AuxLogits" in end_points:
-              slim.losses.softmax_cross_entropy(end_points["AuxLogits"], labels, label_smoothing=self.__args["label-smoothing"], weights=0.4, scope="aux_loss")
-            slim.losses.softmax_cross_entropy(logits, labels, label_smoothing=self.__args["label-smoothing"], weights=1.0)
+              tf.contrib.slim.losses.softmax_cross_entropy(end_points["AuxLogits"], labels, label_smoothing=self.__args["label-smoothing"], weights=0.4, scope="aux_loss")
+            tf.contrib.slim.losses.softmax_cross_entropy(logits, labels, label_smoothing=self.__args["label-smoothing"], weights=1.0)
             losses.append(tf.add_n(tf.get_collection(tf.GraphKeys.LOSSES, worker_scope), name="sum_loss"))
     return losses
 
@@ -138,12 +138,12 @@ class SlimExperiment(_Experiment):
         network_fn = nets_factory.get_network_fn(self.__model, num_classes=(dataset.num_classes - self.__args["labels-offset"]), weight_decay=self.__args["weight-decay"], is_training=False)
       # Create a dataset provider that loads data from the dataset
       with tf.device(device_dataset):
-        provider = slim.dataset_data_provider.DatasetDataProvider(dataset, num_readers=self.__args["nb-fetcher-threads"], common_queue_capacity=(4 * self.__args["eval-batch-size"]), common_queue_min=(2 * self.__args["eval-batch-size"]))
+        provider = tf.contrib.slim.dataset_data_provider.DatasetDataProvider(dataset, num_readers=self.__args["nb-fetcher-threads"], common_queue_capacity=(4 * self.__args["eval-batch-size"]), common_queue_min=(2 * self.__args["eval-batch-size"]))
         [image, label] = provider.get(["image", "label"])
         label -= self.__args["labels-offset"]
         image = preproc_fn(image, network_fn.default_image_size, network_fn.default_image_size)
         images, labels = tf.train.batch([image, label], batch_size=self.__args["eval-batch-size"], num_threads=self.__args["nb-batcher-threads"], capacity=(2 * self.__args["eval-batch-size"]))
-        batch_queue = slim.prefetch_queue.prefetch_queue([images, labels], capacity=(2 * len(device_models)))
+        batch_queue = tf.contrib.slim.prefetch_queue.prefetch_queue([images, labels], capacity=(2 * len(device_models)))
     # Model definitions and accuracy computations
     accuracies = []
     with tf.variable_scope("shared", reuse=tf.AUTO_REUSE):
@@ -165,6 +165,7 @@ with tools.ExpandPath(pathlib.Path(__file__).parent / "slim"):
   from .                       import slim
   from .slim.datasets          import dataset_factory
   from .slim.preprocessing     import preprocessing_factory
+  from .slim.nets              import nets_factory
   from .slim.nets.nets_factory import networks_map
 
 # List available models
