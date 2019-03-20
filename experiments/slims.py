@@ -2,6 +2,7 @@
 ###
  # @file   slims.py
  # @author Sébastien Rouault <sebastien.rouault@epfl.ch>
+ # @author Georgios Damaskinos <georgios.damaskinos@epfl.ch>
  #
  # @section LICENSE
  #

@@ -1,11 +1,18 @@
+<img align="right" width="33%" height="33%" src="acm_badges.png">
+
 # AggregaThor
 
 Authors: Georgios Damaskinos, Arsany Guirguis, Sébastien Rouault
 
-This is the framework introduced in [AggregaThor: Byzantine Machine Learning via Robust Gradient Aggregation (SysML19')](https://www.sysml.cc/papers.html),
+This is the framework introduced in [AggregaThor: Byzantine Machine Learning via Robust Gradient Aggregation (SysML19')](http://www.sysml.cc/doc/2019/54.pdf),
 co-authored by El Mahdi El Mhamdi, who provided the algorithms design and formal guarantees, and Rachid Guerraoui, who supervised the project.
 
-## Structure
+## Requirements
+
+* TensorFlow (1.10.1)
+* Python (3.5+)
+
+## Basic usage
 * `deploy.py` *To deploy a TF cluster over SSH (no need for NFS).*
 ```
 usage: deploy.py [-h] --cluster CLUSTER [--deploy] [--id ID]
