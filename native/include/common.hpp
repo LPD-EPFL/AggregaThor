@@ -86,7 +86,7 @@ namespace Exception {
          * @return Explanatory string \
         **/ \
         virtual char const* what() const noexcept { \
-            return "grading: " text; \
+            return "native: " text; \
         } \
     }
 
