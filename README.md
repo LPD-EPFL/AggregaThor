@@ -4,7 +4,7 @@
 
 Authors: Georgios Damaskinos, Arsany Guirguis, Sébastien Rouault
 
-This is the framework introduced in [AggregaThor: Byzantine Machine Learning via Robust Gradient Aggregation (SysML19')](http://www.sysml.cc/doc/2019/54.pdf),
+This is the framework introduced in [AggregaThor: Byzantine Machine Learning via Robust Gradient Aggregation (SysML19')](https://mlsys.org/Conferences/2019/doc/2019/54.pdf),
 co-authored by El Mahdi El Mhamdi, who provided the algorithms design and formal guarantees, and Rachid Guerraoui, who supervised the project.
 
 ## Requirements
